@@ -85,11 +85,11 @@ mod tests {
 
     use std::{cmp::min, io};
 
-    use num_traits::{PrimInt, Unsigned};
+    use num_traits::PrimInt;
 
     use crate::LEB128Codec;
 
-    fn trip<N: PrimInt + Unsigned + std::fmt::Debug, O: PrimInt + Unsigned + std::fmt::Debug>(
+    fn trip<N: PrimInt + std::fmt::Debug, O: PrimInt + std::fmt::Debug>(
         num: N,
     ) -> Result<O, io::Error> {
         let mut buf = [0; 32];
@@ -99,7 +99,7 @@ mod tests {
         O::leb128_decode(&mut readable)
     }
 
-    fn assert_trip<N: PrimInt + Unsigned + std::fmt::Debug>(num: N) {
+    fn assert_trip<N: PrimInt + std::fmt::Debug>(num: N) {
         assert_eq!(
             num,
             trip(num).unwrap_or_else(|e| panic!(
@@ -125,30 +125,54 @@ mod tests {
     }
 
     #[test]
+    fn signed_trips() {
+        for x in -128..128 {
+            assert_trip(x as u8);
+        }
+        for x in -32768..32768 {
+            assert_trip(x as u16);
+            assert_trip(x as u32 * 65536);
+            assert_trip(x as u64 * 65536 * 65536);
+            assert_trip(x as u128 * 65536 * 65536 * 65536);
+        }
+    }
+
+    fn assert_trip_overflow<
+        Encode: PrimInt + std::fmt::Debug,
+        Decode: PrimInt + std::fmt::Debug,
+    >(
+        input: Encode,
+    ) {
+        assert!(trip::<Encode, Decode>(input).unwrap_err().kind() == io::ErrorKind::InvalidData)
+    }
+
+    fn test_overflow<Encode: PrimInt + std::fmt::Debug, Decode: PrimInt + std::fmt::Debug>(
+        negative: bool,
+    ) {
+        let sign = if negative { -1 } else { 1 };
+        let bit_size = Decode::zero().count_zeros();
+        let first_overflow: i128 = 2.pow(bit_size) * sign;
+        for x in 0..min(65536 * sign, first_overflow << 3) {
+            assert_trip_overflow::<Encode, Decode>(Encode::from(first_overflow + x).unwrap());
+        }
+    }
+    #[test]
     fn unsigned_overflow() {
-        fn assert_trip_overflow<
-            Encode: PrimInt + Unsigned + std::fmt::Debug,
-            Decode: PrimInt + Unsigned + std::fmt::Debug,
-        >(
-            input: Encode,
-        ) {
-            assert!(trip::<Encode, Decode>(input).unwrap_err().kind() == io::ErrorKind::InvalidData)
-        }
+        test_overflow::<u16, u8>(false);
+        test_overflow::<u32, u16>(false);
+        test_overflow::<u64, u32>(false);
+        test_overflow::<u128, u64>(false);
+    }
+    #[test]
+    fn signed_overflow() {
+        test_overflow::<i16, i8>(false);
+        test_overflow::<i32, i16>(false);
+        test_overflow::<i64, i32>(false);
+        test_overflow::<i128, i64>(false);
 
-        fn test_overflow<
-            Encode: PrimInt + Unsigned + std::fmt::Debug,
-            Decode: PrimInt + Unsigned + std::fmt::Debug,
-        >() {
-            let bit_size = Decode::zero().count_zeros();
-            let first_overflow: u128 = 2.pow(bit_size);
-            for x in 0..min(65536, first_overflow << 3) {
-                assert_trip_overflow::<Encode, Decode>(Encode::from(first_overflow + x).unwrap());
-            }
-        }
-
-        test_overflow::<u16, u8>();
-        test_overflow::<u32, u16>();
-        test_overflow::<u64, u32>();
-        test_overflow::<u128, u64>();
+        test_overflow::<i16, i8>(true);
+        test_overflow::<i32, i16>(true);
+        test_overflow::<i64, i32>(true);
+        test_overflow::<i128, i64>(true);
     }
 }
