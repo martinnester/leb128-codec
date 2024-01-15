@@ -12,32 +12,40 @@ pub trait LEB128Codec {
 
 pub const CONTINUATION: u8 = 1 << 7;
 
-impl<N: num_traits::Unsigned + num_traits::PrimInt> LEB128Codec for N {
+fn is_signed<N: num_traits::PrimInt>() -> bool {
+    return N::zero().checked_sub(&N::one()).is_some();
+}
+
+impl<N: num_traits::PrimInt> LEB128Codec for N {
     fn leb128_decode<R>(reader: &mut R) -> Result<Self, io::Error>
     where
         R: Sized + io::Read,
         Self: Sized,
     {
-        let mut num = N::zero();
-        let max_shift = ((num.count_zeros() as usize) / 7) * 7;
-        let max_last_byte = !(0xFF << (num.count_zeros() as usize - max_shift));
-        let mut buffer: [u8; 1] = [0];
-        let mut shift = 0;
-        loop {
-            reader.read_exact(&mut buffer)?;
-            let ends = (buffer[0] & CONTINUATION) == 0;
-            if !ends {
-                buffer[0] = buffer[0] ^ CONTINUATION;
-            }
-            let num_like: N = N::from(buffer[0]).unwrap();
+        if is_signed::<Self>() {
+            todo!()
+        } else {
+            let mut num = N::zero();
+            let max_shift = ((num.count_zeros() as usize) / 7) * 7;
+            let max_last_byte = !(0xFF << (num.count_zeros() as usize - max_shift));
+            let mut buffer: [u8; 1] = [0];
+            let mut shift = 0;
+            loop {
+                reader.read_exact(&mut buffer)?;
+                let ends = (buffer[0] & CONTINUATION) == 0;
+                if !ends {
+                    buffer[0] = buffer[0] ^ CONTINUATION;
+                }
+                let num_like: N = N::from(buffer[0]).unwrap();
 
-            if shift == max_shift && buffer[0] > max_last_byte {
-                return Err(io::Error::from(io::ErrorKind::InvalidData));
-            }
-            num = num | (num_like << shift);
-            shift += 7;
-            if ends {
-                break Ok(num);
+                if shift == max_shift && buffer[0] > max_last_byte {
+                    return Err(io::Error::from(io::ErrorKind::InvalidData));
+                }
+                num = num | (num_like << shift);
+                shift += 7;
+                if ends {
+                    break Ok(num);
+                }
             }
         }
     }
@@ -47,26 +55,31 @@ impl<N: num_traits::Unsigned + num_traits::PrimInt> LEB128Codec for N {
         W: Sized + io::Write,
         Self: Sized,
     {
-        let byte_mask = N::from(0xFF).unwrap();
-        let mut num = self;
-        let mut bytes_written = 0;
-        loop {
-            let byte: u8 = (num & byte_mask).to_u8().unwrap();
-            num = num >> 7;
-            let ends = num.is_zero();
-            let out = if ends {
-                byte & !CONTINUATION
-            } else {
-                byte | CONTINUATION
-            };
-            writer.write(&[out])?;
-            bytes_written += 1;
-            if ends {
-                break Ok(bytes_written);
-            };
+        if is_signed::<Self>() {
+            todo!();
+        } else {
+            let byte_mask = N::from(0xFF).unwrap();
+            let mut num = self;
+            let mut bytes_written = 0;
+            loop {
+                let byte: u8 = (num & byte_mask).to_u8().unwrap();
+                num = num >> 7;
+                let ends = num.is_zero();
+                let out = if ends {
+                    byte & !CONTINUATION
+                } else {
+                    byte | CONTINUATION
+                };
+                writer.write(&[out])?;
+                bytes_written += 1;
+                if ends {
+                    break Ok(bytes_written);
+                };
+            }
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
 
