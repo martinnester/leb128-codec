@@ -175,4 +175,23 @@ mod tests {
         test_overflow::<i64, i32>(true);
         test_overflow::<i128, i64>(true);
     }
+
+    fn read_byte<R: io::Read>(reader: &mut R) -> Option<u8> {
+        let mut byte = [0];
+        if reader.read(&mut byte).unwrap() == 1 {
+            Some(byte[0])
+        } else {
+            None
+        }
+    }
+
+    fn assert_buffers_eq<A: io::Read, B: io::Read>(a: &mut A, b: &mut B) {
+        loop {
+            match (read_byte(a), read_byte(b)) {
+                (Some(byte_a), Some(byte_b)) => assert_eq!(byte_a, byte_b),
+                (None, None) => break,
+                x => panic!("{x:?}"),
+            }
+        }
+    }
 }
