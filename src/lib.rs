@@ -127,13 +127,13 @@ mod tests {
     #[test]
     fn signed_trips() {
         for x in -128..128 {
-            assert_trip(x as u8);
+            assert_trip(x as i8);
         }
         for x in -32768..32768 {
-            assert_trip(x as u16);
-            assert_trip(x as u32 * 65536);
-            assert_trip(x as u64 * 65536 * 65536);
-            assert_trip(x as u128 * 65536 * 65536 * 65536);
+            assert_trip(x as i16);
+            assert_trip(x as i32 * 65536);
+            assert_trip(x as i64 * 65536 * 65536);
+            assert_trip(x as i128 * 65536 * 65536 * 65536);
         }
     }
 
