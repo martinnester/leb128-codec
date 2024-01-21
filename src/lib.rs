@@ -1,4 +1,6 @@
 use std::io;
+
+use num_traits::{PrimInt, Zero};
 pub trait LEB128Codec {
     fn leb128_decode<R>(reader: &mut R) -> Result<Self, io::Error>
     where
@@ -12,15 +14,55 @@ pub trait LEB128Codec {
 
 pub const CONTINUATION: u8 = 1 << 7;
 
-impl<N: num_traits::Unsigned + num_traits::PrimInt> LEB128Codec for N {
+fn get_shr<N: num_traits::PrimInt>() -> fn(N, u32) -> N {
+    if is_signed::<N>() {
+        N::signed_shr
+    } else {
+        N::unsigned_shr
+    }
+}
+fn is_signed<N: num_traits::PrimInt>() -> bool {
+    return N::zero().checked_sub(&N::one()).is_some();
+}
+fn is_encode_end<N: num_traits::PrimInt>(num: N) -> bool {
+    let shr = get_shr::<N>();
+    if is_signed::<N>() {
+        let num = shr(num, 6);
+        num.is_zero() || (num + N::one()).is_zero()
+    } else {
+        let num = shr(num, 7);
+        num.is_zero()
+    }
+}
+fn get_7bits<N: num_traits::PrimInt>(num: N) -> u8 {
+    let bits = N::zero().count_zeros() as usize;
+    let shift = bits - 7;
+    (num << shift).unsigned_shr(shift as u32).to_u8().unwrap()
+}
+fn last_byte_overflow<N: num_traits::PrimInt>(byte: u8, shift: usize) -> bool {
+    let bits = N::zero().count_zeros() as usize;
+    let sections = bits / 7;
+    let max_shift = (sections * 7) as usize;
+    let used_bits = bits - max_shift;
+    let is_last_byte = shift == max_shift;
+    let signed = is_signed::<N>();
+    let full_byte = if signed {
+        (byte << 1).signed_shr(1)
+    } else {
+        byte
+    };
+    let normalized = full_byte.signed_shr(used_bits as u32);
+    is_last_byte && !(normalized.is_zero() || (signed && ((normalized ^ 0xFF).is_zero())))
+}
+
+impl<N: num_traits::PrimInt> LEB128Codec for N {
     fn leb128_decode<R>(reader: &mut R) -> Result<Self, io::Error>
     where
         R: Sized + io::Read,
         Self: Sized,
     {
         let mut num = N::zero();
-        let max_shift = ((num.count_zeros() as usize) / 7) * 7;
-        let max_last_byte = !(0xFF << (num.count_zeros() as usize - max_shift));
+        let bits = num.count_zeros() as usize;
         let mut buffer: [u8; 1] = [0];
         let mut shift = 0;
         loop {
@@ -31,12 +73,16 @@ impl<N: num_traits::Unsigned + num_traits::PrimInt> LEB128Codec for N {
             }
             let num_like: N = N::from(buffer[0]).unwrap();
 
-            if shift == max_shift && buffer[0] > max_last_byte {
+            if last_byte_overflow::<N>(buffer[0], shift) {
                 return Err(io::Error::from(io::ErrorKind::InvalidData));
             }
             num = num | (num_like << shift);
             shift += 7;
             if ends {
+                if is_signed::<Self>() && !(buffer[0] >> 6).is_zero() && shift < bits {
+                    let empty_bits = bits - shift;
+                    num = (num << empty_bits).signed_shr(empty_bits as u32);
+                }
                 break Ok(num);
             }
         }
@@ -47,13 +93,13 @@ impl<N: num_traits::Unsigned + num_traits::PrimInt> LEB128Codec for N {
         W: Sized + io::Write,
         Self: Sized,
     {
-        let byte_mask = N::from(0xFF).unwrap();
         let mut num = self;
         let mut bytes_written = 0;
+        let shr = get_shr::<Self>();
         loop {
-            let byte: u8 = (num & byte_mask).to_u8().unwrap();
-            num = num >> 7;
-            let ends = num.is_zero();
+            let byte: u8 = get_7bits(num);
+            let ends = is_encode_end(num);
+            num = shr(num, 7);
             let out = if ends {
                 byte & !CONTINUATION
             } else {
@@ -67,16 +113,21 @@ impl<N: num_traits::Unsigned + num_traits::PrimInt> LEB128Codec for N {
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
 
-    use std::{cmp::min, io};
+    use std::{
+        cmp::min,
+        fmt::Debug,
+        io::{self, Write},
+    };
 
-    use num_traits::{PrimInt, Unsigned};
+    use num_traits::PrimInt;
 
-    use crate::LEB128Codec;
+    use crate::{is_signed, LEB128Codec};
 
-    fn trip<N: PrimInt + Unsigned + std::fmt::Debug, O: PrimInt + Unsigned + std::fmt::Debug>(
+    fn trip<N: PrimInt + std::fmt::Debug, O: PrimInt + std::fmt::Debug>(
         num: N,
     ) -> Result<O, io::Error> {
         let mut buf = [0; 32];
@@ -86,13 +137,14 @@ mod tests {
         O::leb128_decode(&mut readable)
     }
 
-    fn assert_trip<N: PrimInt + Unsigned + std::fmt::Debug>(num: N) {
+    fn assert_trip<N: PrimInt + std::fmt::Debug>(num: N) {
         assert_eq!(
             num,
             trip(num).unwrap_or_else(|e| panic!(
-                "{:?} on {:?} of type u{:?}",
+                "{:?} on {:?} of type {}{:?}",
                 e,
                 num,
+                if is_signed::<N>() { "i" } else { "u" },
                 N::zero().count_zeros()
             ))
         );
@@ -112,30 +164,96 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_overflow() {
-        fn assert_trip_overflow<
-            Encode: PrimInt + Unsigned + std::fmt::Debug,
-            Decode: PrimInt + Unsigned + std::fmt::Debug,
-        >(
-            input: Encode,
-        ) {
-            assert!(trip::<Encode, Decode>(input).unwrap_err().kind() == io::ErrorKind::InvalidData)
+    fn signed_trips() {
+        for x in -128..128 {
+            assert_trip(x as i8);
         }
+        for x in -32768..32768 {
+            assert_trip(x as i16);
+            assert_trip(x as i32 * 65536);
+            assert_trip(x as i64 * 65536 * 65536);
+            assert_trip(x as i128 * 65536 * 65536 * 65536);
+        }
+    }
 
-        fn test_overflow<
-            Encode: PrimInt + Unsigned + std::fmt::Debug,
-            Decode: PrimInt + Unsigned + std::fmt::Debug,
-        >() {
-            let bit_size = Decode::zero().count_zeros();
-            let first_overflow: u128 = 2.pow(bit_size);
-            for x in 0..min(65536, first_overflow << 3) {
-                assert_trip_overflow::<Encode, Decode>(Encode::from(first_overflow + x).unwrap());
+    fn assert_trip_overflow<
+        Encode: PrimInt + std::fmt::Debug,
+        Decode: PrimInt + std::fmt::Debug,
+    >(
+        input: Encode,
+    ) {
+        assert!(trip::<Encode, Decode>(input).unwrap_err().kind() == io::ErrorKind::InvalidData)
+    }
+
+    fn test_overflow<Encode: PrimInt + std::fmt::Debug, Decode: PrimInt + std::fmt::Debug>(
+        negative: bool,
+    ) {
+        let sign = if negative { -1 } else { 1 };
+        let bit_size = Decode::zero().count_zeros();
+        let first_overflow: i128 = 2.pow(bit_size) * sign;
+        for x in 0..min(65536 * sign, first_overflow << 3) {
+            assert_trip_overflow::<Encode, Decode>(Encode::from(first_overflow + x).unwrap());
+        }
+    }
+    #[test]
+    fn unsigned_overflow() {
+        test_overflow::<u16, u8>(false);
+        test_overflow::<u32, u16>(false);
+        test_overflow::<u64, u32>(false);
+        test_overflow::<u128, u64>(false);
+    }
+    #[test]
+    fn signed_overflow() {
+        test_overflow::<i16, i8>(false);
+        test_overflow::<i32, i16>(false);
+        test_overflow::<i64, i32>(false);
+        test_overflow::<i128, i64>(false);
+
+        test_overflow::<i16, i8>(true);
+        test_overflow::<i32, i16>(true);
+        test_overflow::<i64, i32>(true);
+        test_overflow::<i128, i64>(true);
+    }
+
+    fn read_byte<R: io::Read>(reader: &mut R) -> Option<u8> {
+        let mut byte = [0];
+        if reader.read(&mut byte).unwrap() == 1 {
+            Some(byte[0])
+        } else {
+            None
+        }
+    }
+
+    fn assert_buffers_eq<const A: usize, const E: usize>(actual: [u8; A], expected: [u8; E]) {
+        let mut expected_read = &expected[..];
+        let mut actual_read = &actual[..];
+        loop {
+            match (read_byte(&mut actual_read), read_byte(&mut expected_read)) {
+                (Some(byte_a), Some(byte_b)) => assert_eq!(byte_a, byte_b),
+                (Some(0), None) | (None, Some(0)) | (None, None) => break,
+                x => panic!("{x:?}"),
             }
         }
-
-        test_overflow::<u16, u8>();
-        test_overflow::<u32, u16>();
-        test_overflow::<u64, u32>();
-        test_overflow::<u128, u64>();
+    }
+    fn assert_trip_exact<N: PrimInt + Debug, const E: usize>(num: N, encoding: [u8; E]) {
+        let mut buf = [0; 32];
+        let mut writable = &mut buf[..];
+        num.leb128_encode(&mut writable).unwrap();
+        assert_buffers_eq(buf, encoding);
+        let mut readable = &buf[..];
+        let decoded = N::leb128_decode(&mut readable).unwrap();
+        assert_eq!(decoded, num);
+    }
+    #[test]
+    fn test_unsigned_exact() {
+        assert_trip_exact(0x81u8, [0x81, 0x1]);
+        assert_trip_exact(0x29442u64, [0xC2, 0xA8, 0xA]);
+    }
+    #[test]
+    fn test_signed_exact() {
+        assert_trip_exact(-128i8, [0x80, 0x7F]);
+        assert_trip_exact(0x7Fi16, [0xFF, 0x00]);
+        assert_trip_exact(-0x53i32, [0xAD, 0x7F]);
+        assert_trip_exact(-0x8652i32, [0xAE, 0xF3, 0x7D]);
     }
 }
