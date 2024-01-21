@@ -1,6 +1,6 @@
 use std::io;
 
-use num_traits::Zero;
+use num_traits::{PrimInt, Zero};
 pub trait LEB128Codec {
     fn leb128_decode<R>(reader: &mut R) -> Result<Self, io::Error>
     where
@@ -34,6 +34,26 @@ fn is_encode_end<N: num_traits::PrimInt>(num: N) -> bool {
         num.is_zero()
     }
 }
+fn get_7bits<N: num_traits::PrimInt>(num: N) -> u8 {
+    let bits = N::zero().count_zeros() as usize;
+    let shift = bits - 7;
+    (num << shift).unsigned_shr(shift as u32).to_u8().unwrap()
+}
+fn last_byte_overflow<N: num_traits::PrimInt>(byte: u8, shift: usize) -> bool {
+    let bits = N::zero().count_zeros() as usize;
+    let sections = bits / 7;
+    let max_shift = (sections * 7) as usize;
+    let used_bits = bits - max_shift;
+    let is_last_byte = shift == max_shift;
+    let signed = is_signed::<N>();
+    let full_byte = if signed {
+        (byte << 1).signed_shr(1)
+    } else {
+        byte
+    };
+    let normalized = full_byte.signed_shr(used_bits as u32);
+    is_last_byte && !(normalized.is_zero() || (signed && ((normalized ^ 0xFF).is_zero())))
+}
 
 impl<N: num_traits::PrimInt> LEB128Codec for N {
     fn leb128_decode<R>(reader: &mut R) -> Result<Self, io::Error>
@@ -43,9 +63,6 @@ impl<N: num_traits::PrimInt> LEB128Codec for N {
     {
         let mut num = N::zero();
         let bits = num.count_zeros() as usize;
-
-        let max_shift = (bits / 7) * 7;
-        let max_last_byte = !(0xFF << (bits - max_shift));
         let mut buffer: [u8; 1] = [0];
         let mut shift = 0;
         loop {
@@ -56,13 +73,13 @@ impl<N: num_traits::PrimInt> LEB128Codec for N {
             }
             let num_like: N = N::from(buffer[0]).unwrap();
 
-            if shift == max_shift && buffer[0] > max_last_byte {
+            if last_byte_overflow::<N>(buffer[0], shift) {
                 return Err(io::Error::from(io::ErrorKind::InvalidData));
             }
             num = num | (num_like << shift);
             shift += 7;
             if ends {
-                if is_signed::<Self>() && !(buffer[0] >> 6).is_zero() {
+                if is_signed::<Self>() && !(buffer[0] >> 6).is_zero() && shift < bits {
                     let empty_bits = bits - shift;
                     num = (num << empty_bits).signed_shr(empty_bits as u32);
                 }
@@ -76,12 +93,11 @@ impl<N: num_traits::PrimInt> LEB128Codec for N {
         W: Sized + io::Write,
         Self: Sized,
     {
-        let byte_mask = N::from(0xFF).unwrap();
         let mut num = self;
         let mut bytes_written = 0;
         let shr = get_shr::<Self>();
         loop {
-            let byte: u8 = (num & byte_mask).to_u8().unwrap();
+            let byte: u8 = get_7bits(num);
             let ends = is_encode_end(num);
             num = shr(num, 7);
             let out = if ends {
@@ -109,7 +125,7 @@ mod tests {
 
     use num_traits::PrimInt;
 
-    use crate::LEB128Codec;
+    use crate::{is_signed, LEB128Codec};
 
     fn trip<N: PrimInt + std::fmt::Debug, O: PrimInt + std::fmt::Debug>(
         num: N,
@@ -125,9 +141,10 @@ mod tests {
         assert_eq!(
             num,
             trip(num).unwrap_or_else(|e| panic!(
-                "{:?} on {:?} of type u{:?}",
+                "{:?} on {:?} of type {}{:?}",
                 e,
                 num,
+                if is_signed::<N>() { "i" } else { "u" },
                 N::zero().count_zeros()
             ))
         );
@@ -224,7 +241,8 @@ mod tests {
         num.leb128_encode(&mut writable).unwrap();
         assert_buffers_eq(buf, encoding);
         let mut readable = &buf[..];
-        assert_eq!(N::leb128_decode(&mut readable).unwrap(), num);
+        let decoded = N::leb128_decode(&mut readable).unwrap();
+        assert_eq!(decoded, num);
     }
     #[test]
     fn test_unsigned_exact() {
@@ -233,6 +251,7 @@ mod tests {
     }
     #[test]
     fn test_signed_exact() {
+        assert_trip_exact(-128i8, [0x80, 0x7F]);
         assert_trip_exact(0x7Fi16, [0xFF, 0x00]);
         assert_trip_exact(-0x53i32, [0xAD, 0x7F]);
         assert_trip_exact(-0x8652i32, [0xAE, 0xF3, 0x7D]);
