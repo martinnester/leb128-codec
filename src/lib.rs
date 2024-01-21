@@ -12,8 +12,25 @@ pub trait LEB128Codec {
 
 pub const CONTINUATION: u8 = 1 << 7;
 
+fn get_shr<N: num_traits::PrimInt>() -> fn(N, u32) -> N {
+    if is_signed::<N>() {
+        N::signed_shr
+    } else {
+        N::unsigned_shr
+    }
+}
 fn is_signed<N: num_traits::PrimInt>() -> bool {
     return N::zero().checked_sub(&N::one()).is_some();
+}
+fn is_encode_end<N: num_traits::PrimInt>(num: N) -> bool {
+    let shr = get_shr::<N>();
+    if is_signed::<N>() {
+        let num = shr(num, 6);
+        num.is_zero() || (num + N::one()).is_zero()
+    } else {
+        let num = shr(num, 7);
+        num.is_zero()
+    }
 }
 
 impl<N: num_traits::PrimInt> LEB128Codec for N {
@@ -55,27 +72,24 @@ impl<N: num_traits::PrimInt> LEB128Codec for N {
         W: Sized + io::Write,
         Self: Sized,
     {
-        if is_signed::<Self>() {
-            todo!();
-        } else {
-            let byte_mask = N::from(0xFF).unwrap();
-            let mut num = self;
-            let mut bytes_written = 0;
-            loop {
-                let byte: u8 = (num & byte_mask).to_u8().unwrap();
-                num = num >> 7;
-                let ends = num.is_zero();
-                let out = if ends {
-                    byte & !CONTINUATION
-                } else {
-                    byte | CONTINUATION
-                };
-                writer.write(&[out])?;
-                bytes_written += 1;
-                if ends {
-                    break Ok(bytes_written);
-                };
-            }
+        let byte_mask = N::from(0xFF).unwrap();
+        let mut num = self;
+        let mut bytes_written = 0;
+        let shr = get_shr::<Self>();
+        loop {
+            let byte: u8 = (num & byte_mask).to_u8().unwrap();
+            let ends = is_encode_end(num);
+            num = shr(num, 7);
+            let out = if ends {
+                byte & !CONTINUATION
+            } else {
+                byte | CONTINUATION
+            };
+            writer.write(&[out])?;
+            bytes_written += 1;
+            if ends {
+                break Ok(bytes_written);
+            };
         }
     }
 }
