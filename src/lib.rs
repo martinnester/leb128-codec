@@ -85,6 +85,7 @@ mod tests {
 
     use std::{
         cmp::min,
+        fmt::Debug,
         io::{self, Write},
     };
 
@@ -199,20 +200,23 @@ mod tests {
             }
         }
     }
-    fn assert_encode_eq<N: PrimInt, const E: usize>(num: N, encoding: [u8; E]) {
+    fn assert_trip_exact<N: PrimInt + Debug, const E: usize>(num: N, encoding: [u8; E]) {
         let mut buf = [0; 32];
         let mut writable = &mut buf[..];
         num.leb128_encode(&mut writable).unwrap();
         assert_buffers_eq(buf, encoding);
+        let mut readable = &buf[..];
+        assert_eq!(N::leb128_decode(&mut readable).unwrap(), num);
     }
     #[test]
-    fn test_unsigned_encodings() {
-        assert_encode_eq(0x81u8, [0x81, 0x1]);
-        assert_encode_eq(0x29442u64, [0xC2, 0xA8, 0xA]);
+    fn test_unsigned_exact() {
+        assert_trip_exact(0x81u8, [0x81, 0x1]);
+        assert_trip_exact(0x29442u64, [0xC2, 0xA8, 0xA]);
     }
     #[test]
-    fn test_signed_encodings() {
-        assert_encode_eq(-0x53i32, [0xAD, 0x7F]);
-        assert_encode_eq(-0x8652i32, [0xAE, 0xF3, 0x7D]);
+    fn test_signed_exact() {
+        assert_trip_exact(0x7Fi16, [0xFF, 0x00]);
+        assert_trip_exact(-0x53i32, [0xAD, 0x7F]);
+        assert_trip_exact(-0x8652i32, [0xAE, 0xF3, 0x7D]);
     }
 }
