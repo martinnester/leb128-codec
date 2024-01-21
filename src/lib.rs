@@ -83,7 +83,10 @@ impl<N: num_traits::PrimInt> LEB128Codec for N {
 #[cfg(test)]
 mod tests {
 
-    use std::{cmp::min, io};
+    use std::{
+        cmp::min,
+        io::{self, Write},
+    };
 
     use num_traits::PrimInt;
 
@@ -185,13 +188,31 @@ mod tests {
         }
     }
 
-    fn assert_buffers_eq<A: io::Read, B: io::Read>(a: &mut A, b: &mut B) {
+    fn assert_buffers_eq<const A: usize, const E: usize>(actual: [u8; A], expected: [u8; E]) {
+        let mut expected_read = &expected[..];
+        let mut actual_read = &actual[..];
         loop {
-            match (read_byte(a), read_byte(b)) {
+            match (read_byte(&mut actual_read), read_byte(&mut expected_read)) {
                 (Some(byte_a), Some(byte_b)) => assert_eq!(byte_a, byte_b),
-                (None, None) => break,
+                (Some(0), None) | (None, Some(0)) | (None, None) => break,
                 x => panic!("{x:?}"),
             }
         }
+    }
+    fn assert_encode_eq<N: PrimInt, const E: usize>(num: N, encoding: [u8; E]) {
+        let mut buf = [0; 32];
+        let mut writable = &mut buf[..];
+        num.leb128_encode(&mut writable).unwrap();
+        assert_buffers_eq(buf, encoding);
+    }
+    #[test]
+    fn test_unsigned_encodings() {
+        assert_encode_eq(0x81u8, [0x81, 0x1]);
+        assert_encode_eq(0x29442u64, [0xC2, 0xA8, 0xA]);
+    }
+    #[test]
+    fn test_signed_encodings() {
+        assert_encode_eq(-0x53i32, [0xAD, 0x7F]);
+        assert_encode_eq(-0x8652i32, [0xAE, 0xF3, 0x7D]);
     }
 }
